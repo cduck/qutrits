@@ -1,4 +1,6 @@
 
+import itertools
+
 from cirq import ops
 from cirq.qutrit import raw_types, common_gates
 from cirq.qutrit.ancilla_generation_gate import AncillaGen
@@ -156,6 +158,93 @@ class PlusKUncarryAddGate(raw_types.TernaryLogicGate,
         yield from not_ops
         yield from _gen_or_and_control_u(op, qubits[:-1], k, self.carry_in)
         yield from not_ops
+
+
+class UpwardMultiAndGate(raw_types.TernaryLogicGate,
+                         ops.ReversibleEffect,
+                         ops.CompositeGate,
+                         ops.TextDiagrammable):
+    def __init__(self, *, _inverted=False):
+        self._inverted = _inverted
+
+    def inverse(self):
+        return UpwardMultiAndGate(_inverted=not self._inverted)
+
+    def text_diagram_info(self, args):
+        return ops.TextDiagramInfo(('[Upward and{}]'.format(
+                                     ' inv' if self._inverted else ''),)
+                                   * args.known_qubit_count)
+
+    def validate_trits(self, trits):
+        super().validate_trits(trits)
+
+    def applied_to_trits(self, trits):
+        inv = -1 if self._inverted else 1
+        return [(trit + inv*all(t==1+self._inverted for t in trits[i+1:])) % 3
+                for i, trit in enumerate(trits)]
+
+    def default_decompose(self, qubits):
+        if self._inverted:
+            op_list = tuple(self.decompose_forward(qubits))
+            return ops.inverse(op_list)
+        else:
+            return self.decompose_forward(qubits)
+
+    def decompose_forward(self, qubits):
+        n = len(qubits)
+        for shift in range(((n-1).bit_length() - 1), -1, -1):
+            num_controls = 1 << shift
+            for i in range(n, num_controls, -num_controls*2):
+                yield UpwardMultiControlPlusOneGate(bottom_control_2 = i!=n)(
+                            *qubits[i-num_controls-1:i])
+        if n > 0:
+            yield common_gates.PlusOne(qubits[-1])
+
+
+class UpwardMultiControlPlusOneGate(raw_types.TernaryLogicGate,
+                                    ops.ReversibleEffect,
+                                    ops.CompositeGate,
+                                    ops.TextDiagrammable):
+    def __init__(self, bottom_control_2=False, *, _inverted=False):
+        self.bottom_control_2 = bottom_control_2
+        self._inverted = _inverted
+
+    def inverse(self):
+        return UpwardMultiControlPlusOneGate(bottom_control_2=self.bottom_control_2,
+                                             _inverted=not self._inverted)
+
+    def text_diagram_info(self, args):
+        syms = ['1'] * args.known_qubit_count
+        syms[0] = '[-1]' if self._inverted else '[+1]'
+        if self.bottom_control_2 and args.known_qubit_count > 1:
+            syms[-1] = '2'
+        return ops.TextDiagramInfo(tuple(syms))
+
+    def validate_trits(self, trits):
+        super().validate_trits(trits)
+        assert len(trits) > 0, 'Gate only operates on one or more qutrits'
+
+    def applied_to_trits(self, trits):
+        control_triggered = (all(trit == 1 for trit in trits[1:-1]) and
+                             all(trit == 1 + bool(self.bottom_control_2)
+                                 for trit in trits[-1:]))
+        if control_triggered:
+            shift = -1 if self._inverted else 1
+            trits[0] = (trits[0] + shift) % 3
+        return trits
+
+    def default_decompose(self, qubits):
+        qubit_mask = {q: True for q in qubits}
+        qubit_mask[qubits[-1]] = not self.bottom_control_2
+        and_ops = tuple(_gen_log_and_upward(qubits, qubit_mask))
+        if len(and_ops) <= 0:
+            and_ops = (common_gates.PlusOne(qubits[0]),)
+        if self._inverted:
+            yield from and_ops[:-1]
+            yield from ops.inverse(and_ops)
+        else:
+            yield from and_ops
+            yield from ops.inverse(and_ops[:-1])
 
 
 class MultiOrAndGate(raw_types.TernaryLogicGate,
@@ -316,10 +405,6 @@ class MultiOrAndGate(raw_types.TernaryLogicGate,
                                     qubits[-1], qubits[-3], qubits[-2])
 
 
-def _gen_or_and_control_u(controlled_op, qubits, k, carry_in):
-    ...
-
-
 def _gen_log_and_upward(qubits, qubit_mask=None):
     if qubit_mask is None:
         qubit_mask = {q: True for q in qubits}
@@ -330,19 +415,11 @@ def _gen_log_and_upward(qubits, qubit_mask=None):
         assert qubit_mask[qubits[0]]
         qubit_mask[qubits[0]] = False
         yield common_gates.C1PlusOne(qubits[1], qubits[0])
-    elif _is_pow_2(n+1):
-        yield from _gen_log_and_upward(qubits[1:1+n//2], qubit_mask)
-        yield from _gen_log_and_upward(qubits[1+n//2:], qubit_mask)
-        assert qubit_mask[qubits[0]]
-        qubit_mask[qubits[0]] = False
-        yield common_gates.ControlledTernaryGate(common_gates.PlusOne,
-                                ((1 if qubit_mask[qubits[1]] else 2,),
-                                 (1 if qubit_mask[qubits[1+n//2]] else 2,)))(
-                            qubits[1], qubits[1+n//2], qubits[0])
     else:
-        nice_n = (1 << ((n+1).bit_length() - 1)) - 1
+        nice_n = (1 << (n.bit_length() - 1)) - 1
         yield from _gen_log_and_upward(qubits[1:-nice_n], qubit_mask)
-        yield from _gen_log_and_upward(qubits[-nice_n:], qubit_mask)
+        if nice_n + 1 <= n:
+            yield from _gen_log_and_upward(qubits[-nice_n:], qubit_mask)
         assert qubit_mask[qubits[0]]
         qubit_mask[qubits[0]] = False
         if nice_n + 1 == n:
@@ -354,7 +431,3 @@ def _gen_log_and_upward(qubits, qubit_mask=None):
                                 ((1 if qubit_mask[qubits[1]] else 2,),
                                  (1 if qubit_mask[qubits[-nice_n]] else 2,)))(
                             qubits[1], qubits[-nice_n], qubits[0])
-
-
-def _is_pow_2(n):
-    return n == 1 << (n.bit_length() - 1)
