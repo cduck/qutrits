@@ -119,10 +119,9 @@ class PlusKUncarryAddGate(raw_types.TernaryLogicGate,
                           ops.ReversibleEffect,
                           ops.CompositeGate,
                           ops.TextDiagrammable):
-    def __init__(self, k, carry_in, *, _inverted=False):
+    def __init__(self, k, carry_in):
         self.k = k
         self.carry_in = carry_in
-        self._inverted = _inverted
 
     def inverse(self):
         return self
