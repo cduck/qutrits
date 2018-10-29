@@ -2,13 +2,13 @@
 import itertools
 
 from cirq import ops
-from cirq.qutrit import raw_types, common_gates
+from cirq.qutrit import raw_types, common_gates, small_plus_k_carry
 from cirq.qutrit.ancilla_generation_gate import AncillaGen
 
 
 def bits_to_val(bits):
     if len(bits) == 0: return 0
-    return int(''.join(map(str, reversed(bits))), 2)
+    return int(''.join(map('{:d}'.format, reversed(bits))), 2)
 
 def val_to_bits(val, num_bits):
     val &= ~((-1) << num_bits)
@@ -43,23 +43,29 @@ class PlusKGate(raw_types.TernaryLogicGate,
         return val_to_bits(reg_val, len(trits))
 
     def default_decompose(self, qubits):
-        yield from self._gen_all_carry(qubits, self.k)
+        k = self.k
+        if self._inverted:
+            k = val_to_bits(-bits_to_val(k), len(k))
+
+        yield from self._gen_all_carry(qubits, k, forward=True)
+        yield from self._gen_all_carry(qubits, k, forward=False)
 
         if self.k[0]:
             yield common_gates.F01(qubits[0])
 
     @classmethod
-    def _gen_all_carry(cls, qubits, k, carry_in=False, carry_ancilla=None):
+    def _gen_all_carry(cls, qubits, k, carry_in=False, carry_ancilla=None, forward=True):
         if len(qubits) <= 0: return
         elif len(qubits) == 1:
             return#yield common_gates.PlusOne(qubits[0])
         elif len(qubits) == 2:
-            if k[0] == 0:
-                yield common_gates.C2F01(qubits[0], qubits[1])
-            else:
-                yield common_gates.C12F01(qubits[0], qubits[1])
-            if k[1]:
-                yield common_gates.F01(qubits[1])
+            if forward:
+                if not k[0]:
+                    yield common_gates.C2F01(qubits[0], qubits[1])
+                else:
+                    yield common_gates.C12F01(qubits[0], qubits[1])
+                if k[1]:
+                    yield common_gates.F01(qubits[1])
         else:
             half = len(qubits) // 2
             half_half = half // 2
@@ -68,57 +74,67 @@ class PlusKGate(raw_types.TernaryLogicGate,
             new_ancilla = None
             if plenty_of_space:
                 gen_op = AncillaGen(*qubits[half-3:half])
-                yield gen_op
                 new_ancilla = qubits[half-1]
+                next_carry_ancilla = carry_ancilla
             else:
-                carry_ancilla = None
-            yield PlusKCarryGate(k[:half], carry_in, carry_ancilla)(*qubits[:half+1])
-            yield from cls._gen_all_carry(qubits[half:], k[half:], True, new_ancilla)
+                next_carry_ancilla = None
+            pre_qubits = () if carry_ancilla is None else (carry_ancilla,)
+            if forward:
+                yield PlusKCarryGate(k[:half], carry_in, carry_ancilla is not None)(
+                                *pre_qubits, *qubits[:half+1])
+            if not forward:
+                yield from cls._gen_all_carry(qubits[:half], k[:half], carry_in, next_carry_ancilla, forward)
+            if gen_op is not None:
+                yield gen_op
+            yield from cls._gen_all_carry(qubits[half:], k[half:], True, new_ancilla, forward)
             if gen_op is not None:
                 yield gen_op.inverse()
-            yield from cls._gen_all_carry(qubits[:half], k[:half], carry_in, carry_ancilla)
-            yield PlusKUncarryAddGate(k[:half], carry_in, carry_ancilla)(*qubits[:half+1])
-            if k[half]:
-                yield common_gates.F01(qubits[half])
+            if forward:
+                yield from cls._gen_all_carry(qubits[:half], k[:half], carry_in, next_carry_ancilla, forward)
+            if not forward:
+                yield PlusKUncarryAddGate(k[:half], carry_in, carry_ancilla is not None)(
+                                *pre_qubits, *qubits[:half+1])
+                if k[half]:
+                    yield common_gates.F01(qubits[half])
 
 
 class PlusKCarryGate(raw_types.TernaryLogicGate,
                      ops.ReversibleEffect,
                      ops.CompositeGate,
                      ops.TextDiagrammable):
-    def __init__(self, k, carry_in=False, carry_ancilla=None, *, _inverted=False):
+    def __init__(self, k, carry_in=False, top_ancilla=False, *, _inverted=False):
         self.k = k
         self.carry_in = carry_in
-        self.carry_ancilla = carry_ancilla
+        self.top_ancilla = top_ancilla
         self._inverted = _inverted
 
     def inverse(self):
         return PlusKCarryGate(self.k, carry_in=self.carry_in,
-                              carry_ancilla=self.carry_ancilla,
+                              top_ancilla=self.top_ancilla,
                               _inverted=not self._inverted)
 
     def text_diagram_info(self, args):
         syms = ['[{}Carry k_{}={}]'.format(
-                    '->'*(i==0 and self.carry_in), i, bit)
+                    '->'*(i==0 and self.carry_in), i, int(bit))
                 for i, bit in enumerate(self.k)]
         syms.append('[-1]' if self._inverted else '[+1]')
-        if self.carry_ancilla is not None:
+        if self.top_ancilla:
             syms[:0] = ['[Ancilla]']
         return ops.TextDiagramInfo(tuple(syms))
 
     def validate_trits(self, trits):
         super().validate_trits(trits)
-        assert len(trits) == len(self.k)+1+self.carry_ancilla, (
+        assert len(trits) == len(self.k)+1+self.top_ancilla, (
                'Gate only operates on len(k)+1 qutrits')
 
     def applied_to_trits(self, trits):
         anc_trits = []
-        if self.carry_ancilla is not None:
+        if self.top_ancilla:
             anc_trits = [trits[0]]
             trits[:1] = []
 
         k_val = bits_to_val(self.k)
-        if self.carry_ancilla is not None:
+        if self.carry_in:
             reg_val = bits_to_val(trits[1:-1]) << 1
             k_val |= 1
             reg_val |= trits[0] == 2 or (trits[0] == 1 and self.k[0])
@@ -133,38 +149,42 @@ class PlusKCarryGate(raw_types.TernaryLogicGate,
             cont_gate = common_gates.MinusOne
         else:
             cont_gate = common_gates.PlusOne
-        return _gen_or_and_control_u(cont_gate, qubits, self.k, self.carry_ancilla)
+        if self.top_ancilla:
+            carry_ancilla, qubits = qubits[0], qubits[1:]
+        else:
+            carry_ancilla = None
+        return _gen_or_and_control_u(cont_gate, qubits, self.k, self.carry_in, carry_ancilla)
 
 
 class PlusKUncarryAddGate(raw_types.TernaryLogicGate,
                           ops.ReversibleEffect,
                           ops.CompositeGate,
                           ops.TextDiagrammable):
-    def __init__(self, k, carry_in=False, carry_ancilla=None):
+    def __init__(self, k, carry_in=False, top_ancilla=False):
         self.k = k
         self.carry_in = carry_in
-        self.carry_ancilla = carry_ancilla
+        self.top_ancilla = top_ancilla
 
     def inverse(self):
         return self
 
     def text_diagram_info(self, args):
         syms = ['[{}Uncarry Add k_{}={}]'.format(
-                    '->'*(i==0 and self.carry_in), i, bit)
+                    '->'*(i==0 and self.carry_in), i, int(bit))
                 for i, bit in enumerate(self.k)]
         syms.append('[F02]')
-        if self.carry_ancilla is not None:
+        if self.top_ancilla:
             syms[:0] = ['[Ancilla]']
         return ops.TextDiagramInfo(tuple(syms))
 
     def validate_trits(self, trits):
         super().validate_trits(trits)
-        assert len(trits) == len(self.k)+1+self.carry_ancilla is not None, (
+        assert len(trits) == len(self.k)+1+self.top_ancilla, (
                'Gate only operates on len(k)+1 qutrits')
 
     def applied_to_trits(self, trits):
         anc_trits = []
-        if self.carry_ancilla is not None:
+        if self.top_ancilla:
             anc_trits = [trits[0]]
             trits[:1] = []
 
@@ -181,41 +201,97 @@ class PlusKUncarryAddGate(raw_types.TernaryLogicGate,
         return anc_trits + trits
 
     def default_decompose(self, qubits):
+        if self.top_ancilla:
+            carry_ancilla, qubits = qubits[0], qubits[1:]
+        else:
+            carry_ancilla = None
         cont_gate = common_gates.F02
         not_ops = [common_gates.F01(q) for q in qubits[1:-1]]
         yield from not_ops
-        yield from _gen_or_and_control_u(cont_gate, qubits, self.k, self.carry_in, self.carry_ancilla)
+        yield from _gen_or_and_control_u(cont_gate, qubits, self.k, self.carry_in, carry_ancilla)
         yield from not_ops
 
 
 def _gen_or_and_control_u(u_gate, qubits, k, carry_in=False, carry_ancilla=None):
-    forward_ops = tuple(_gen_or_and_forward(qubits[:-1], k, carry_in, carry_ancilla))
-    yield from forward_ops
-    yield common_gates.ControlledTernaryGate(u_gate, ((0,1),))(
-                            qubits[-2], qubits[-1])
-    yield from ops.inverse(forward_ops)
+    if not carry_in and not any(k):
+        # No carry and k=0000...
+        return
+
+    if _can_make_enough_ancilla(k, carry_in=carry_in, carry_ancilla=carry_ancilla):
+        forward_ops = tuple(_gen_or_and_forward(qubits[:-1], k, carry_in, carry_ancilla))
+        yield from forward_ops
+        yield common_gates.ControlledTernaryGate(u_gate, ((0,1),))(
+                                qubits[-2], qubits[-1])
+        yield from ops.inverse(forward_ops)
+    else:
+        yield small_plus_k_carry.SmallPlusKCarry(k, carry_in, u_gate)(*qubits)
+
+
+def _can_make_enough_ancilla(k, carry_in=False, carry_ancilla=None):
+    if carry_in and carry_ancilla is None:
+        return False
+
+    one_group = 0
+    free_count = 0
+    input_count = 0
+    for k_i in k:
+        if k_i:
+            one_group += 1
+        elif one_group > 0:
+            if one_group > 5:
+                free_count += one_group - 5
+            if one_group <= 3:
+                input_count += 1
+            one_group = 0
+
+        if not k_i:
+            free_count += 1
+    ancilla_count = free_count // 3
+
+    if ancilla_count == 0:
+        return input_count == 0
+    return (input_count + ancilla_count - 1) // ancilla_count <= 4
 
 
 def _gen_or_and_forward(qubits, k, carry_in=False, carry_ancilla=None):
-    ############# Catch if there are not enough ancilla, otherwise use the linear versions
     # TODO: carry in
+    if carry_in:
+        print('XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX Carrying in!')
+        assert carry_ancilla is not None, 'Carry in but no carry ancilla provided'
+
+        cont = (1, 2) if k[0] else (2,)
+        yield common_gates.ControlledTernaryGate(common_gates.F01, (cont,)
+                                )(qubits[0], carry_ancilla)
+
+        k = list(k)
+        k[0] = True
+
+        # Now use the ancilla as if it is the first qubit of the sum
+        orig_qubit0 = qubits[0]
+        qubits = list(qubits)
+        qubits[0] = carry_ancilla
 
     # Layer 0: Compute if each zero bit can propagate to the end
     zero_qubits = tuple(q for k_i, q in zip(k, qubits) if not k_i)
-    upward_and = UpwardMultiAndGate()(*zero_qubits)
-    yield upward_and
+    if len(zero_qubits) > 0:
+        upward_and = UpwardMultiAndGate()(*zero_qubits)
+        yield upward_and
+    else:
+        upward_and = None
 
     # Layer 1 (and plan layer 2): Calculate if each group of ones can generate
     # then propagate to the end
     one_qubit_group = []
     free_qubit_group = []  # For layer 2 planning
-    new_ancilla_qubits = []
+    new_ancilla_qubits = []  # Zero ancilla for layer 3
     gen_ancilla_ops = []  # Layer 2 operations
-    layer3_qubits = []  # For layer 3
-    layer4_qubits = []  # For layer 4
+    layer3_qubits = []  #  Input calculate and store in ancilla for layer 3
+    layer4_qubits = []  # 0/1 qubits to calculate the and of layer 3 for layer 4
     for k_i, q in zip(k, qubits):
         if k_i:
             one_qubit_group.append(q)
+            if len(one_qubit_group) >= 5:
+                free_qubit_group.append(one_qubit_group[-5])  # Plan layer 2
         elif len(one_qubit_group) > 0:
             yield MultiOrAndGate()(*one_qubit_group, q)
             if len(one_qubit_group) > 3:
@@ -223,31 +299,54 @@ def _gen_or_and_forward(qubits, k, carry_in=False, carry_ancilla=None):
                 layer4_qubits.append(one_qubit_group[-1])
             else:
                 layer3_qubits.append(one_qubit_group[-1])
+
             one_qubit_group.clear()
 
         # Plan layer 2
         if not k_i:
             free_qubit_group.append(q)
-        if len(free_qubit_group) >= 3:
-            gen_ancilla_ops.append(AncillaGen(*free_qubit_group[-3:]))
-            new_ancilla_qubits.append(free_qubit_group[-1])
-            layer4_qubits.append(free_qubit_group[-1])
-            free_qubit_group[3:] = ()
+        while len(free_qubit_group) >= 3:
+            gen_ancilla_ops.append(AncillaGen(*free_qubit_group[:3]))
+            new_ancilla_qubits.append(free_qubit_group[2])
+            layer4_qubits.append(free_qubit_group[2])
+            free_qubit_group[:3] = ()
+
+    # If k ends with trailing ones
+    for q in one_qubit_group:
+        yield common_gates.F01(q)
+        layer4_qubits.append(q)
 
     # Uncompute layer 0: Restore zero bits to the qubit basis
-    yield upward_and.inverse()
+    if upward_and is not None:
+        yield upward_and.inverse()
 
-    # Layer 2: Generate ancilla for later
+    # Layer 2: Generate ancilla for layer 3
     yield from gen_ancilla_ops
 
-    # Layer 3
-    # TODO
-    # TEMP
-    for q in qubits:
-        yield common_gates.PlusOne(q)
+    # Layer 3: Collect information from qutrits into ancilla
+    if len(new_ancilla_qubits) > 0:
+        n_control = (len(layer3_qubits) + len(new_ancilla_qubits) - 1) // len(new_ancilla_qubits)
+        assert n_control <= 4, 'Too few ancilla in layer 3'
+        n_in = len(layer3_qubits)
+        for n_anc in range(len(new_ancilla_qubits), 0, -1):
+            n_control = n_in // n_anc
+            end = -n_in+n_control
+            if end == 0: end = None
+            yield common_gates.ControlledTernaryGate(
+                        common_gates.F01, ((0,1),)*n_control
+                    )(*layer3_qubits[-n_in:end], new_ancilla_qubits[-n_anc])
+            n_in -= n_control
+        assert n_in == 0, 'Logic error'
+    else:
+        assert len(layer3_qubits) == 0, 'No ancilla in layer 3'
 
-    # Layer 4
+    # Layer 4: Collect carry answer into one qubit
+    assert len(layer4_qubits) > 0, 'No qubits in layer 4'
     yield UpwardMultiControlPlusOneGate()(*layer4_qubits[::-1])
+
+    # Make the last qubit the output
+    if layer4_qubits[-1] != qubits[-1]:
+        yield common_gates.Swap(layer4_qubits[-1], qubits[-1])
 
 
 class UpwardMultiAndGate(raw_types.TernaryLogicGate,
@@ -510,7 +609,7 @@ def _gen_log_and_upward(qubits, qubit_mask=None):
         yield from _gen_log_and_upward(qubits[1:-nice_n], qubit_mask)
         if nice_n + 1 <= n:
             yield from _gen_log_and_upward(qubits[-nice_n:], qubit_mask)
-        assert qubit_mask[qubits[0]]
+        #assert qubit_mask[qubits[0]]
         qubit_mask[qubits[0]] = False
         if nice_n + 1 == n:
             yield common_gates.ControlledTernaryGate(common_gates.PlusOne,

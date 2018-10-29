@@ -25,11 +25,17 @@ class AncillaGenerationGate(raw_types.TernaryLogicGate,
     for k in _map:
         assert _map[k] == _all_map[k], '_map is invalid'
 
+    def __init__(self, *, _inverted=False):
+        self._inverted = _inverted
+
     def inverse(self):
-        return self
+        return AncillaGenerationGate(_inverted=not self._inverted)
 
     def text_diagram_info(self, args):
-        return ops.TextDiagramInfo(('0,1->0,1,2', '0,1->0,1,2', '0,1->0'))
+        if self._inverted:
+            return ops.TextDiagramInfo(('0,1,2->0,1', '0,1,2->0,1', '0->0,1'))
+        else:
+            return ops.TextDiagramInfo(('0,1->0,1,2', '0,1->0,1,2', '0,1->0'))
 
     def validate_trits(self, trits):
         super().validate_trits(trits)
@@ -41,7 +47,7 @@ class AncillaGenerationGate(raw_types.TernaryLogicGate,
 
     def default_decompose(self, qubits):
         q0, q1, q2 = qubits
-        return (
+        op_list = (
             common_gates.C1PlusOne(q2, q1),
             common_gates.C1PlusOne(q2, q0),
 
@@ -54,6 +60,10 @@ class AncillaGenerationGate(raw_types.TernaryLogicGate,
             common_gates.C01C01PlusOne(q0, q1, q2),
             common_gates.MinusOne(q2),
         )
+        if self._inverted:
+            return ops.inverse(op_list)
+        else:
+            return op_list
 
 
 AncillaGen = AncillaGenerationGate()
