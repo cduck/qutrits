@@ -230,6 +230,9 @@ def _gen_or_and_control_u(u_gate, qubits, k, carry_in=False, carry_ancilla=None)
 def _can_make_enough_ancilla(k, carry_in=False, carry_ancilla=None):
     if carry_in and carry_ancilla is None:
         return False
+    if carry_in and not k[0]:
+        k = list(k)
+        k[0] = True
 
     one_group = 0
     free_count = 0
@@ -254,17 +257,17 @@ def _can_make_enough_ancilla(k, carry_in=False, carry_ancilla=None):
 
 
 def _gen_or_and_forward(qubits, k, carry_in=False, carry_ancilla=None):
-    # TODO: carry in
     if carry_in:
-        print('XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX Carrying in!')
+        print('Carrying in!')
         assert carry_ancilla is not None, 'Carry in but no carry ancilla provided'
 
         cont = (1, 2) if k[0] else (2,)
         yield common_gates.ControlledTernaryGate(common_gates.F01, (cont,)
                                 )(qubits[0], carry_ancilla)
 
-        k = list(k)
-        k[0] = True
+        if not k[0]:
+            k = list(k)
+            k[0] = True
 
         # Now use the ancilla as if it is the first qubit of the sum
         orig_qubit0 = qubits[0]
@@ -603,13 +606,15 @@ def _gen_log_and_upward(qubits, qubit_mask=None):
     elif n == 2:
         assert qubit_mask[qubits[0]]
         qubit_mask[qubits[0]] = False
-        yield common_gates.C1PlusOne(qubits[1], qubits[0])
+        yield common_gates.ControlledTernaryGate(common_gates.PlusOne,
+                            ((1 if qubit_mask[qubits[1]] else 2,),))(
+                        qubits[1], qubits[0])
     else:
         nice_n = (1 << (n.bit_length() - 1)) - 1
         yield from _gen_log_and_upward(qubits[1:-nice_n], qubit_mask)
         if nice_n + 1 <= n:
             yield from _gen_log_and_upward(qubits[-nice_n:], qubit_mask)
-        #assert qubit_mask[qubits[0]]
+        assert qubit_mask[qubits[0]]
         qubit_mask[qubits[0]] = False
         if nice_n + 1 == n:
             yield common_gates.ControlledTernaryGate(common_gates.PlusOne,
