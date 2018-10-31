@@ -237,7 +237,9 @@ def _can_make_enough_ancilla(k, carry_in=False, carry_ancilla=None):
     one_group = 0
     free_count = 0
     input_count = 0
-    for k_i in k:
+    last_zero_k_i = max((-k_i, i) for i, k_i in enumerate(k))[1]
+    if k[last_zero_k_i]: last_zero_k_i = -1
+    for k_i in k[:last_zero_k_i+1]:
         if k_i:
             one_group += 1
         elif one_group > 0:
@@ -249,6 +251,10 @@ def _can_make_enough_ancilla(k, carry_in=False, carry_ancilla=None):
 
         if not k_i:
             free_count += 1
+    n_trailing_ones = len(k) - (last_zero_k_i+1)
+    if n_trailing_ones > 1:
+        input_count += 1
+        free_count += n_trailing_ones - 1
     ancilla_count = free_count // 3
 
     if ancilla_count == 0:
@@ -290,7 +296,9 @@ def _gen_or_and_forward(qubits, k, carry_in=False, carry_ancilla=None):
     gen_ancilla_ops = []  # Layer 2 operations
     layer3_qubits = []  #  Input calculate and store in ancilla for layer 3
     layer4_qubits = []  # 0/1 qubits to calculate the and of layer 3 for layer 4
-    for k_i, q in zip(k, qubits):
+    last_zero_k_i = max((-k_i, i) for i, k_i in enumerate(k))[1]
+    if k[last_zero_k_i]: last_zero_k_i = -1
+    for k_i, q in zip(k[:last_zero_k_i+1], qubits):
         if k_i:
             one_qubit_group.append(q)
             if len(one_qubit_group) >= 5:
@@ -314,10 +322,22 @@ def _gen_or_and_forward(qubits, k, carry_in=False, carry_ancilla=None):
             layer4_qubits.append(free_qubit_group[2])
             free_qubit_group[:3] = ()
 
-    # If k ends with trailing ones
-    for q in one_qubit_group:
-        yield common_gates.F01(q)
-        layer4_qubits.append(q)
+    trailing_one_qubits = qubits[last_zero_k_i+1:len(k)]
+    last_layer_3_invert = False
+    if len(trailing_one_qubits) == 1:
+        yield common_gates.F01(trailing_one_qubits[0])
+        layer4_qubits.append(trailing_one_qubits[0])
+    elif len(trailing_one_qubits) > 1:
+        yield from (common_gates.F01(q) for q in trailing_one_qubits)
+        yield UpwardMultiControlPlusOneGate()(*trailing_one_qubits[::-1])
+        free_qubit_group.extend(trailing_one_qubits[:-1])
+        while len(free_qubit_group) >= 3:
+            gen_ancilla_ops.append(AncillaGen(*free_qubit_group[:3]))
+            new_ancilla_qubits.append(free_qubit_group[2])
+            layer4_qubits.append(free_qubit_group[2])
+            free_qubit_group[:3] = ()
+        layer3_qubits.append(trailing_one_qubits[-1])
+        last_layer_3_invert = True
 
     # Uncompute layer 0: Restore zero bits to the qubit basis
     if upward_and is not None:
@@ -333,10 +353,14 @@ def _gen_or_and_forward(qubits, k, carry_in=False, carry_ancilla=None):
         n_in = len(layer3_qubits)
         for n_anc in range(len(new_ancilla_qubits), 0, -1):
             n_control = n_in // n_anc
+            controls = [(0,1),]*n_control
+            if n_control == n_in and last_layer_3_invert:
+                # Invert the control on the last layer 3 qubit
+                controls[-1] = (2,)
             end = -n_in+n_control
             if end == 0: end = None
             yield common_gates.ControlledTernaryGate(
-                        common_gates.F01, ((0,1),)*n_control
+                        common_gates.F01, controls
                     )(*layer3_qubits[-n_in:end], new_ancilla_qubits[-n_anc])
             n_in -= n_control
         assert n_in == 0, 'Logic error'
