@@ -4,6 +4,9 @@ The code is built on top of the 0.4.0.dev35 version of cirq. It can be installed
 
 The quantum trajectories style simulation is accomplished in the `apply_unitary_effect_to_state(...)` method. In principle, the code can be generalized for arbitrary qudit levels by setting QUDIT_LEVELS in cirq/__init__.py. However, the specific gate set and noise models provided here are for qutrits.
 
+**Note: The functionality in this fork to create and simulate qutrit (and more generally qudit) circuits has now been** `integrated into <https://github.com/quantumlib/Cirq/issues/933>`_ `Cirq <https://quantumai.google/cirq/qudits>`_.
+
+
 .. code-block:: python
 
   import cirq
